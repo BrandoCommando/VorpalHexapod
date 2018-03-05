@@ -8,14 +8,14 @@
 // For information on licensing this work for commercial purposes, please send email to support@vorpalrobotics.com
 //
 
-char *Version = "#V1r8e";   // in this version, fixes to make debugging RECORD feature easier
+char *Version = (char*)"#V1r8f";   // in this version, fixes to make debugging RECORD feature easier
 
-int debugmode = 0;   // make this 1 for debug mode. NOTE: debug mode may make Scratch unstable, don't leave it on!
+int debugmode = 1;   // make this 1 for debug mode. NOTE: debug mode may make Scratch unstable, don't leave it on!
 
 #include <SPI.h>
 #include <SD.h>
-#include <Wire.h>
 #include <SoftwareSerial.h>
+#include "Adafruit_MCP23017.h"
 
 //////////////////////////////////////////
 // Gamepad layout, using variable names used in this code:
@@ -70,12 +70,27 @@ int debugmode = 0;   // make this 1 for debug mode. NOTE: debug mode may make Sc
 // and they correspond to dpad directions (weapon is the extra dpad button, stop is the lack of any button being pressed).
 
 
-SoftwareSerial BlueTooth(A5,A4);  // connect bluetooth module Tx=A5=Yellow wire Rx=A4=Green Wire
+SoftwareSerial BlueTooth(A7,A6);  // connect bluetooth module Tx=A5=Yellow wire Rx=A4=Green Wire
                                   // although not intuitive, the analog ports function just fine as digital ports for this purpose
                                   // and in order to keep the wiring simple for the 4x4 button matrix as well as the SPI lines needed
                                   // for the SD card, it was necessary to use analog ports for the bluetooth module.
 
+Adafruit_MCP23017 mcpMatrix;
+Adafruit_MCP23017 mcpDPAD;
 
+#define MCP_PRESSED LOW
+#define MCP_DPAD_B 6
+#define MCP_DPAD_F 3
+#define MCP_DPAD_L 7
+#define MCP_DPAD_R 4
+#define MCP_DPAD_W 5
+
+//#define DPAD_DIGITAL 1
+#define DPAD_B 5
+#define DPAD_L 4
+#define DPAD_R 2
+#define DPAD_F 3
+#define DPAD_W 6
 
 // Matrix button definitions
 // Top row
@@ -113,13 +128,14 @@ SoftwareSerial BlueTooth(A5,A4);  // connect bluetooth module Tx=A5=Yellow wire 
 #define NCOL 4
 
 long suppressButtonsUntil = 0;   // default is not to suppress until we see serial data
-int verbose = 0;
+int verbose = 1;
 File SDGamepadRecordFile;        // REC.txt, holds the gamepad record/play file
-char *SDGamepadRecordFileName = "REC.txt";
+char *SDGamepadRecordFileName = (char*)"REC.txt";
 File SDScratchRecordFile; // there is potentially one of these per button, but we will only use one at a time
                           // they are named for the button combination that plays the recording. 
                           // For example W1f.txt is Walk mode 1 forward button
 
+int MatrixMap[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
 char ModeChars[] = {'W', 'D', 'F', 'R'};
 char SubmodeChars[] = {'1', '2', '3', '4'};
 
@@ -162,6 +178,34 @@ int longClick = 0;  // this will be set to 1 if the last matrix button pressed w
 #define LONGCLICKMILLIS 500  // half a second engages "long click" mode
 
 int scanmatrix() {
+  for(int row=0; row < NROW; row++)
+    for(int col=0; col < NCOL; col++)
+      if(mcpMatrix.digitalRead(col + (NCOL * row)) == MCP_PRESSED)
+      {
+          if (row < 3) {
+            CurCmd = ModeChars[row];
+            CurSubCmd = SubmodeChars[col];
+          }
+         int curmatrix = MatrixMap[row*NROW+col];
+         if(curmatrix != priorMatrix)
+         {
+          curMatrixStartTime = millis();
+          priorMatrix = curmatrix;
+          longClick = 0;
+         } else if (millis() - curMatrixStartTime > LONGCLICKMILLIS) {
+          // User has been holding down the same button continuously for a long time
+          if (longClick != 1) {
+                  setBeep(400,50);  // second tone giving user feedback that long click has engaged
+          }
+          longClick = 1;
+        }
+         return curmatrix;
+      }
+  priorMatrix = -1;
+  curMatrixStartTime = 0;
+  return -1;
+}
+int scanmatrix2() {
   // we will energize row lines then read column lines
 
   // first set all rows to high impedance mode
@@ -213,8 +257,46 @@ int scanmatrix() {
   return -1;
 }
 
-
 char decode_button(int b) {
+  #if defined(DPAD_DIGITAL) && defined(DPAD_B)
+  if(digitalRead(DPAD_B) == LOW)
+    return 'b';
+  #else
+  if(mcpDPAD.digitalRead(MCP_DPAD_B) == MCP_PRESSED)
+    return 'b';
+  #endif
+  #if defined(DPAD_DIGITAL) && defined(DPAD_L)
+  if(digitalRead(DPAD_L) == LOW)
+    return 'l';
+  #else
+  if(mcpDPAD.digitalRead(MCP_DPAD_L) == MCP_PRESSED)
+    return 'l';
+  #endif
+  #if defined(DPAD_DIGITAL) && defined(DPAD_R)
+  if(digitalRead(DPAD_R) == LOW)
+    return 'r';
+  #else
+  if(mcpDPAD.digitalRead(MCP_DPAD_R) == MCP_PRESSED)
+    return 'r';
+  #endif
+  #if defined(DPAD_DIGITAL) && defined(DPAD_W)
+  if(digitalRead(DPAD_W) == LOW)
+    return 'w';
+  #else
+  if(mcpDPAD.digitalRead(MCP_DPAD_W) == MCP_PRESSED)
+    return 'w';
+  #endif
+  #if defined(DPAD_DIGITAL) && defined(DPAD_F)
+  if(digitalRead(DPAD_F) == LOW)
+    return 'f';
+  #else
+  if(mcpDPAD.digitalRead(MCP_DPAD_F) == MCP_PRESSED)
+    return 'f';
+  #endif
+  return 's';
+}
+
+char decode_button2(int b) {
 
   //Serial.print("DPAD: "); Serial.println(b);
   
@@ -458,7 +540,21 @@ void RecordPlayHandler() {
 void setup() {
 
   Serial.begin(9600);
+  while(!Serial);
   Serial.println(Version);  // this will be printed on Scratch Console so you know the gamepad is talking to Scratch
+
+  mcpMatrix.begin(0);
+  for(int i = 0; i < 16; i++)
+  {
+    mcpMatrix.pinMode(i, INPUT);
+    mcpMatrix.pullUp(i, HIGH);
+  }
+  mcpDPAD.begin(0x03);
+  for(int i = 0; i < 16; i++)
+  {
+    mcpDPAD.pinMode(i, INPUT);
+    mcpDPAD.pullUp(i, HIGH);
+  }
   
   // make a characteristic flashing pattern to indicate the gamepad code is loaded.
   pinMode(13, OUTPUT);
@@ -481,11 +577,29 @@ void setup() {
   digitalWrite(VCCA1, HIGH);
   pinMode(10, OUTPUT);
   digitalWrite(10, HIGH); // chip select for SD card
+
+  #if defined(DPAD_DIGITAL)
+  #if defined(DPAD_B)
+  pinMode(DPAD_B, INPUT_PULLUP);
+  #endif
+  #if defined(DPAD_L)
+  pinMode(DPAD_L, INPUT_PULLUP);
+  #endif
+  #if defined(DPAD_R)
+  pinMode(DPAD_R, INPUT_PULLUP);
+  #endif
+  #if defined(DPAD_F)
+  pinMode(DPAD_F, INPUT_PULLUP);
+  #endif
+  #if defined(DPAD_W)
+  pinMode(DPAD_W, INPUT_PULLUP);
+  #endif
+  #endif
   
   if (!SD.begin(10)) {
     Serial.println("#SDBF");    // SD Begin Failed
     return;
-  }
+  } else Serial.println("#SDSS");
 
   // if the R4 button (recording erase) is being held down during boot, then
   // erase all recordings on the SD card
@@ -520,7 +634,7 @@ void setup() {
     setBeep(BF_ERROR, BD_LONG);
     Serial.println("#SDOF");    // SD Open Failed
   }
-
+  debug((char*)"#READY");
 }
 
 int priormatrix = -1;
@@ -662,7 +776,7 @@ int handleSerialInput() {
 
 void loop() {
   int matrix = scanmatrix();
-  if (debugmode && matrix != -1) {
+  if (debugmode && matrix > 0) {
     Serial.print("#MA:");Serial.println(matrix);
   }
 
@@ -767,7 +881,9 @@ void loop() {
   
   CurDpad = decode_button(analogRead(DpadPin));
 
-  if (debugmode && CurDpad != 's') {
+  if (debugmode
+      && CurDpad != 's'
+    ) {
     Serial.print("#DPAD="); Serial.println(CurDpad);
   }
 
@@ -837,7 +953,7 @@ void loop() {
     //
 
     if (debugmode) {
-      Serial.print("#S="); Serial.print(CurCmd); Serial.print(CurSubCmd); Serial.println(CurDpad);
+      //Serial.print("#S="); Serial.print(CurCmd); Serial.print(CurSubCmd); Serial.println(CurDpad);
     }
     BlueTooth.print("V1"); // Vorpal hexapod radio protocol header version 1
     int eight=8;
